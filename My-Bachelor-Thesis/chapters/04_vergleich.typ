@@ -334,7 +334,7 @@ Dieser Abschnitt dokumentiert die technische Umsetzung und die Unterschiede zwis
     ],
   )
 
-  *Nachteil:*
+  // *Nachteil:*
 
 + *Version 2: Zentralisiertes Common-Modul:*
 
@@ -365,7 +365,7 @@ Dieser Abschnitt dokumentiert die technische Umsetzung und die Unterschiede zwis
     ],
   )
 
-  *Vorteil:*
+  // *Vorteil:*
 
 #heading(
   "E. Qualitäts- und Vollständigkeitsanalyse des Quellcodes (Code Quality & Completeness):",
@@ -1662,4 +1662,179 @@ Dieser Abschnitt analysiert die im Workflow 2 (KI-Zuerst) entwickelte Manager-Ob
       ),
     )
 
-== Case Study Frontend
+== Herausforderungen und Grenzen der KI-gestützten Entwicklung
+
+Dieses Kapitel ergänzt die Ergebnisse aus 4.2 und 4.3 um Aspekte, die in den finalen „Clean“-Versionen nur eingeschränkt sichtbar sind: Bug-Muster, Iterationsbedarf und typische Grenzen der KI-Unterstützung. Der Fokus liegt auf Fehlern, die erst im Systemkontext (Persistenz, Contracts, Edge Cases, Datenflüsse zwischen Modulen) auftreten und dadurch messbaren Review-/Debug-Aufwand verursachen.
+
+// === Bug-Kategorien und Messansatz
+//   + **
+=== Workflow 1 (Mensch zuerst – KI danach):
+
+    In Abschnitt 4.3 wurde gezeigt, dass Künstliche Intelligenz (KI) bei der Optimierung von Quellcode unterstützend eingesetzt werden kann. Um eine saubere und qualitativ hochwertige Endversion zu gewährleisten, ist jedoch eine sorgfältige Überprüfung und Bewertung der von der KI generierten Versionen erforderlich, da KI nicht in jedem Kontext automatisch die optimale Lösung liefert. Die folgenden Beispiele verdeutlichen Fehler, die in früheren KI-generierten Versionen aufgetreten sind.
+
++ *Backend - Bugs:*
+  - *Beispiel 1*: MenuService
+    
+    - *Bug A* (Data & Persistence): Fehlende `@Transactional-Annotation` in der Methode create(), wodurch Persistenzoperationen nicht zuverlässig ausgeführt wurden.
+
+      #figure(
+          caption: [Create function in MenuService],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            // PRE-FINAL BUG: @Transactional fehlt
+            public MenuItem create(CreateMenuItemRequest request) {
+                MenuItem item = new MenuItem();
+                item.createdAt = OffsetDateTime.now();
+                item.persist(); // Persistenz/Flush nicht garantiert
+                return item;
+            }
+
+            ```
+          ],
+        )
+
+
+    - *Bug B* (Functional): Fehlerhafte PATCH-Semantik, bei der bestehende Werte unbeabsichtigt durch null überschrieben wurden.
+    
+      #figure(
+          caption: [update function in MenuService],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @Transactional
+            public MenuItem update(Long id, UpdateMenuItemRequest request) {
+                MenuItem item = menuItemRepository.findById(id);
+                item.name  = request.name;   // null überschreibt bestehende Werte
+                item.price = request.price;  // null überschreibt bestehende Werte
+                item.updatedAt = OffsetDateTime.now();
+                return item;
+            }
+
+            ```
+          ],
+        )
+
+      
+    
+    - *Bug C* (Observability / Functional): Fehlende Audit-Informationen beim Soft Delete, wodurch die Nachvollziehbarkeit von Datenänderungen eingeschränkt war.
+    
+      #figure(
+          caption: [softDelete function in MenuService],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @Transactional
+            public void softDelete(Long id) {
+                MenuItem item = menuItemRepository.findById(id);
+                item.active = false;
+                // PRE-FINAL BUG: updatedAt fehlt
+            }
+
+            ```
+          ],
+        )
+
+    - *Bug Count & Debug*:
+      - Bugs: 3
+      - Debug time: ~0.4h (0.1h + 0.2h + 0.1h)
+
+  - *Beispiel 2*: GuestSessionService
+    
+    - *Bug A* (Functional): Fehlende Null-Prüfung für `table` und `nickname`, was zu Laufzeitfehlern führte.
+
+      #figure(
+          caption: [createForTable function in GuestSessionService],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @Transactional
+            public GuestSession createForTable(Table table, String nickname) {
+                // PRE-FINAL BUG: kein Check, ob table null sein kann
+                GuestSession gs = new GuestSession();
+                gs.table = table;
+                gs.nickname = nickname; // nickname kann null sein
+                guestSessionRepository.persist(gs);
+                return gs;
+            }
+
+
+            ```
+          ],
+        )
+
+
+    - *Bug B* (Error Handling): Fehlende Zustandsprüfung beim Schließen, wodurch der Fall „bereits geschlossen“ nicht korrekt behandelt wurde.
+    
+      #figure(
+          caption: [close function in GuestSessionService],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @Transactional
+            public GuestSession close(Long guestSessionId) {
+                GuestSession gs = guestSessionRepository.findById(guestSessionId);
+                if (gs == null) throw new NotFoundException("Guest session not found");
+                gs.active = false; // PRE-FINAL BUG: kein Guard für !gs.active
+                return gs;
+            }
+
+
+            ```
+          ],
+        )
+
+
+    - *Bug Count & Debug*:
+      - Bugs: 2
+      - Debug time: ~0.2h (0.1h + 0.1h)
++ *Frontend - Bugs:*
+
+=== Workflow 2 (KI zuerst – Mensch danach):
+
+In diesem Workflow lässt sich erkennen, dass die Fähigkeit der Künstlichen Intelligenz, auf Basis gegebener Anforderungen schnell und in großer Menge Quellcode zu generieren, besonders ausgeprägt ist. Eine hohe Generierungsgeschwindigkeit bedeutet jedoch nicht zwangsläufig, dass der erzeugte Code stets leicht verständlich und vollständig korrekt ist. Dies führte dazu, dass die Fehlersuche und das Debugging für den Entwickler deutlich komplexer und zeitaufwendiger wurden. Im Folgenden werden die im Workflow 2 identifizierten Bugs dargestellt.
+
+
++ *Backend - Bugs:*
+  - *Bug #1* (Security / Authorization): Fehlende Autorisierung auf allen geschützten Endpunkten.
+
+    #figure(
+          caption: [Eine Beispiel für Resource ohne `@RolesAllowed` ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            // ManagerBillResource.java -  kein authorization (@RolesAllowed)
+            @Path("/api/manager/bills")
+            @Consumes(MediaType.APPLICATION_JSON)
+            @Produces(MediaType.APPLICATION_JSON)
+            public class ManagerBillResource {
+                
+                @POST
+                @Path("/{id}/pay")
+                @Transactional
+                public Bill processPayment(@PathParam("id") Long billId, ...) {
+                    // jede kann diese Endpoint aufrufen!
+                    billingService.processPayment(billId, ...);
+                    return bill;
+                }
+            }
+
+            ```
+          ],
+        )
+
+    Dieses Bug betrifft einen kritischen Sicherheitsmangel im Bereich Authorization und wirkt sich auf sämtliche als geschützt vorgesehenen API-Endpunkte aus. Im Backend wurde keine `@RolesAllowed`-Annotation auf irgendeinem Endpunkt implementiert. Die Zugriffskontrolle erfolgte ausschließlich auf Frontend-Ebene durch eine einfache Authentifizierungsprüfung mittels localStorage.
+
+    Dadurch war es für beliebige externe Akteure möglich, bekannte API-Endpunkte direkt aufzurufen und die Frontend-Logik vollständig zu umgehen. Eine serverseitige Autorisierung zur Überprüfung von Benutzerrollen oder Zugriffsrechten war nicht vorhanden, was ein erhebliches Sicherheitsrisiko für das gesamte System darstellte.
+
+
+
+
+
+
