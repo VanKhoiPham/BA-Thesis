@@ -14,14 +14,16 @@
 #show: bachelor-thesis.with(
   language: "en",
 
-  title-de: "Antwort auf die endgültige Frage nach dem Leben, dem Universum und dem ganzen Rest",
+  title-de: "Optimierter Softwareentwicklungsprozess durch KI: Eine Fallstudie anhand einer Restaurant
+Bestell-App",
   keywords-de: ("Leben", "Universum", "Alles"),
   abstract-de: "Lorem ipsum dolor sit amet, consectetuer adipiscing elit.
 Ut purus elit, vestibulum ut, placerat ac, adipiscing vitae,
 felis. Curabitur dictum gravida mauris. Nam arcu lib
 ero, nonummy eget, consectetuer id, vulputate a, magna.",
 
-  title-en: "Answer to the Ultimate Question of Life, the Universe, and Everything",
+  title-en: "Optimierter Softwareentwicklungsprozess durch KI: Eine Fallstudie anhand einer Restaurant
+Bestell-App",
   keywords-en: ("Live", "Universe", "Everything"),
   abstract-en: "Lorem ipsum dolor sit amet, consectetuer adipiscing elit.
 Ut purus elit, vestibulum ut, placerat ac, adipiscing vitae,
