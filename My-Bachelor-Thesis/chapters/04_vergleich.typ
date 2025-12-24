@@ -1803,6 +1803,10 @@ In diesem Workflow lässt sich erkennen, dass die Fähigkeit der Künstlichen In
 + *Backend - Bugs:*
   - *Bug #1* (Security / Authorization): Fehlende Autorisierung auf allen geschützten Endpunkten.
 
+    -* Beschreibung*: Dieses Bug betrifft einen kritischen Sicherheitsmangel im Bereich Authorization und wirkt sich auf sämtliche als geschützt vorgesehenen API-Endpunkte aus. Im Backend wurde keine `@RolesAllowed`-Annotation auf irgendeinem Endpunkt implementiert. Die Zugriffskontrolle erfolgte ausschließlich auf Frontend-Ebene durch eine einfache Authentifizierungsprüfung mittels localStorage.
+
+      Dadurch war es für beliebige externe Akteure möglich, bekannte API-Endpunkte direkt aufzurufen und die Frontend-Logik vollständig zu umgehen. Eine serverseitige Autorisierung zur Überprüfung von Benutzerrollen oder Zugriffsrechten war nicht vorhanden, was ein erhebliches Sicherheitsrisiko für das gesamte System darstellte.
+
     #figure(
           caption: [Eine Beispiel für Resource ohne `@RolesAllowed` ],
           supplement: [Listing],
@@ -1829,12 +1833,649 @@ In diesem Workflow lässt sich erkennen, dass die Fähigkeit der Künstlichen In
           ],
         )
 
-    Dieses Bug betrifft einen kritischen Sicherheitsmangel im Bereich Authorization und wirkt sich auf sämtliche als geschützt vorgesehenen API-Endpunkte aus. Im Backend wurde keine `@RolesAllowed`-Annotation auf irgendeinem Endpunkt implementiert. Die Zugriffskontrolle erfolgte ausschließlich auf Frontend-Ebene durch eine einfache Authentifizierungsprüfung mittels localStorage.
+    
 
-    Dadurch war es für beliebige externe Akteure möglich, bekannte API-Endpunkte direkt aufzurufen und die Frontend-Logik vollständig zu umgehen. Eine serverseitige Autorisierung zur Überprüfung von Benutzerrollen oder Zugriffsrechten war nicht vorhanden, was ein erhebliches Sicherheitsrisiko für das gesamte System darstellte.
+     - *Debug-Aufwand*: ca. 4–7 Stunden (Autorisierung (1h), Frontend-Anpassung (2h), Endpunkt-Tests (3h)).
+  
+  - *Bug 2* (Data & Persistence): LazyInitializationException
+    - *Feature* : Bill Management (Payment Module)
+    - *Beschreibung*: Bei Bug 2 trat eine LazyInitializationException im Zusammenhang mit den Entitäten Bill Items und Payments auf. Die Ursache lag in der Konfiguration der Collections Bill.items und Bill.payments, welche mittels Hibernate Lazy Loading geladen wurden.
+
+      Zusätzlich bestand ein Problem hinsichtlich der Transaktionsgrenzen: Die Serialisierung des Bill-Objekts durch Jackson erfolgte erst nach dem Abschluss der Datenbanktransaktion. Da JAX-RS die Response-Objekte automatisch serialisiert, wurde beim Zugriff auf die lazy geladenen Collections versucht, auf einen bereits geschlossenen Persistenzkontext zuzugreifen. Dies führte zur genannten Ausnahme und beeinträchtigte die Stabilität der betroffenen Endpunkte. 
+
+     #figure(
+          caption: [ LazyInitializationException Bug ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @POST
+            @Path("/{id}/close")
+            @Transactional
+            public Bill closeBill(@PathParam("id") Long billId) {
+                billingService.closeBill(billId);
+                Bill bill = billRepository.findById(billId);
+                return bill;  //  items & payments werden nicht geladet!
+            }
+            // → Jackson serialize → LazyInitializationException
+
+            // Lösung:
+            //  Force load data in transaction before return
+            // bill.items.size();      // Trigger: SELECT * FROM bill_items
+            // bill.payments.size();   // Trigger: SELECT * FROM payments
+            ```
+          ],
+        )
+
+    - *Debug-Aufwand*: 3-4 Stunden
+
+  - *Bug 3* (Configuration / API Design): Duplicate Endpoint Error
+    - *Feature* : Bill Workflow Redesign
+    - *Beschreibung*: Im Rahmen des Redesigns des Bill-Workflows trat ein   Duplicate-Endpoint-Fehler auf. Die Ursache lag darin, dass beim Erstellen der neuen Klasse `ManagerBillResource.java` nicht erkannt wurde, dass bereits eine ältere Ressource `BillManagerResource.java` existierte. Beide Klassen deklarierten denselben Pfad `@Path`("/api/manager/bills"), was zu einem Konflikt bei der Endpunkt-Registrierung führte.
+
+      Zusätzlich wurde der Fehler durch eine inkonsistente Benennung der Klassen begünstigt (ManagerBillResource vs. BillManagerResource), wodurch die doppelte Definition während der Entwicklung zunächst unbemerkt blieb.
+
+      #figure(
+          caption: [ Duplicate Endpoint Error ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            // File 1: ManagerBillResource.java (neu – korrekter Ort)
+            package com.example.manager.rest;
+
+            @Path("/api/manager/bills")
+            public class ManagerBillResource { ... }
+
+            // File 2: BillManagerResource.java (alt – falscher Ort)
+            package com.example.payment.rest;
+
+            @Path("/api/manager/bills") // DUPLICATE PATH
+            public class BillManagerResource { ... }
+            // Lösung: Remove-Item "src/main/java/com/example/payment/rest/BillManagerResource.java"
+
+            ```
+          ],
+        )
+    - *Debug-Aufwand*: 0.5 Stunde
+
+  - *Bug 4* (Data & Persistence): Fehlerhafte Spaltenzuordnung für den Status der Tabelle
+    - *Feature* : Table Management
+    - *Beschreibung*: Im Rahmen der Implementierung des Table-Managements trat ein Fehler im Datenbankschema auf, der auf eine inkonsistente Spaltenzuordnung zwischen Code und Datenbank zurückzuführen war. Konkret wurde das Attribut `status` in der Entität fälschlicherweise auf die Spalte `table_status` gemappt, während das zugrunde liegende Datenbankschema eine Spalte `status` mit der Einschränkung `NOT NULL` vorsah.
+
+      Da Hibernate beim Einfügen neuer Datensätze die Spalte status nicht explizit befüllte, wurde in der Datenbank ein `NULL`-Wert erzeugt, was zu einem SQL-Fehler führte.
+
+      #figure(
+          caption: [ Fehlerhafte Spaltenzuordnung ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @Entity
+            @Table(name = "tables")
+            public class Table extends PanacheEntity {
+                
+                @Column(name = "table_status", nullable = false, length = 20)
+                public String status = "ACTIVE"; //  falsche Spaltenzuordnung
+                // DB expects: INSERT INTO tables (..., status, ...) VALUES ...
+                // But Hibernate generates: INSERT INTO tables (..., table_status, ...) VALUES ...
+                // → Error: status column is NULL!
+            }
+
+            // Lösung: @Column(nullable = false, length = 20)
+            //          public String status = "ACTIVE"; 
+
+            ```
+          ],
+        )
+    - *Debug-Aufwand*: 1 Stunde
+  
+  - *Bug 5* (Data & Persistence): LazyInitializationException
+    - *Feature* : Promotion Management
+    - *Beschreibung*: Im Rahmen der Promotion-Verarbeitung trat erneut eine LazyInitializationException auf. Der Fehler zeigte sich in zwei aufeinanderfolgenden Schritten.
+
+        In der ersten Behebungsphase wurde – analog zu Bug 1 – ausschließlich die Collection `Bill.items` innerhalb der Transaktion initialisiert. Dies erwies sich jedoch als unzureichend, da die automatische Serialisierung durch Jackson eine tiefere Objektstruktur traversierte (`Bill → BillItem → MenuItem → Tags`).
+
+        In der zweiten Phase wurde festgestellt, dass auch die Collection `MenuItem.tags` lazy geladen war und außerhalb der Transaktionsgrenze initialisiert werden sollte, was erneut zu einer Ausnahme führte.
+
+      #figure(
+          caption: [ applyPromotionToBill (1. Fix) ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @POST
+            @Path("/apply-to-bill/{billId}")
+            @Transactional
+            public Bill applyPromotionToBill(@PathParam("billId") Long billId) {
+                // ... apply promotion logic ...
+                Bill bill = billRepository.findById(billId);
+                
+                bill.items.size();  //  Initialisierung der Items (Fix 1)
+                
+                return bill;  
+                //  Fehler bleibt bestehen:
+                // Bill.items[].menuItem.tags → LazyInitializationException
+            }
+ 
+
+            ```
+          ],
+        )
+
+        #figure(
+          caption: [ applyPromotionToBill (2. Fix) ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @POST
+            @Path("/apply-to-bill/{billId}")
+            @Transactional
+            public Bill applyPromotionToBill(@PathParam("billId") Long billId) {
+                // ... apply promotion logic ...
+                Bill bill = billRepository.findById(billId);
+                
+                // Vollständige Initialisierung des Objektgraphen
+                bill.items.forEach(item -> {
+                    if (item.menuItem != null && item.menuItem.tags != null) {
+                        item.menuItem.tags.size(); // Force load tags
+                    }
+                });
+                
+                return bill;  // Alle benötigten Daten sind initialisiert
+            }
+
+            ```
+          ],
+        )
+    - *Debug-Aufwand*: ca. 2 Stunden
+
+  - *Bug 6* (Functional / Data Consistency): Promotion Targets wurden nicht aktualisiert
+    - *Feature* : Promotion Management
+    - *Beschreibung*: Bei Bug 6 wurde festgestellt, dass bei der Aktualisierung einer Promotion die zugehörigen Targets nicht angepasst wurden. Obwohl über den Endpunkt `PUT /api/promotions/{id}` neue Target-Daten übermittelt wurden, verblieben die bestehenden Target-Einträge unverändert in der Datenbank.
+
+      Die Ursache lag in der Implementierung der Methode `update()` im PromotionService, in der ausschließlich grundlegende Felder der Promotion aktualisiert wurden, während die Verarbeitung des Feldes targets vollständig fehlte. Dadurch entstand eine Inkonsistenz zwischen dem vom Client gesendeten Zustand und dem persistierten Datenbestand.
+
+      #figure(
+          caption: [ Promotion Targets wurden nicht aktualisiert ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @PUT
+            @Path("/{id}")
+            @Transactional
+            public Promotion update(@PathParam("id") Long id, UpdatePromotionRequest request) {
+                Promotion existing = Promotion.findById(id);
+                
+                // Update basic fields
+                existing.name = request.name;
+                existing.discountType = request.discountType;
+                existing.discountValue = request.discountValue;
+                //  Targets werden nicht aktualisiert
+                
+                existing.persist();
+                return existing;  // Targets behalten den alten Zustand
+            }
+
+            // Lösung:
+            // Korrekte Aktualisierung der Targets
+            // existing.targets.clear();
+            // request.targets.forEach(t -> {
+            //     PromotionTarget target = new PromotionTarget();
+            //     target.targetType = t.targetType;
+            //     target.targetId = t.targetId;
+            //     existing.targets.add(target);
+            // });
+            ```
+          ],
+        )
+
+    - *Debug-Aufwand*: ca. 0.75 Stunden
+
+  - *Bug 7* (API Contract / Error Handling): JSON-Parsing-Fehler durch leeren Response-Body
+    - *Feature* : Promotion Management
+    - *Beschreibung*: Bei Bug 7 trat ein Fehler beim JSON-Parsing auf, der durch einen leeren Response-Body verursacht wurde. Der Endpunkt `PATCH /api/promotions/{id}/status` lieferte zwar einen HTTP-Status `200 OK`, enthielt jedoch keinen JSON-Inhalt im Response-Body.
+
+      Auf Frontend-Seite wurde die Antwort standardmäßig mittels `response.json()` verarbeitet. Da der Response-Body leer war, führte dieser Aufruf zu einem Laufzeitfehler (`SyntaxError: Unexpected end of JSON input`). Damit bestand eine Inkonsistenz zwischen dem impliziten API-Vertrag und der tatsächlichen Serverantwort.
+
+      #figure(
+          caption: [ JSON-Parsing-Fehler ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```java
+            @PATCH
+            @Path("/{id}/status")
+            @Transactional
+            public Response toggleStatus(@PathParam("id") Long id, 
+                                        @QueryParam("active") Boolean active) {
+                Promotion promotion = Promotion.findById(id);
+                promotion.isActive = active;
+                promotion.persist();
+                
+                return Response.ok().build();  //  Leerer Response-Body
+            }
+            // Lösung:
+            // return Response.ok(Map.of("isActive", promotion.isActive)).build();
+            ```
+          ],
+        )
+
+    - *Debug-Aufwand*: ca. 0.5 Stunden
+
+  - *Bug 8* (Version Control / Critical Incident): Git-Restore-Vorgang führte zum Verlust wesentlicher Codebestandteile
+    - *Feature* : Gesamtes Backend
+    - *Beschreibung*: Bei Bug 7 handelte es sich um einen kritischen Vorfall, der durch einen unsachgemäß ausgeführten git restore-Vorgang verursacht wurde. Infolge dieser Aktion wurde der Codebestand auf einen älteren Stand zurückgesetzt, wodurch sämtliche Implementierungen in Workflow 1 und Workflow 2 verloren gingen.
+
+      Der Vorfall führte dazu, dass der Build-Prozess nicht mehr erfolgreich abgeschlossen werden konnte. Insgesamt fehlten mehr als 20 Methoden, was zu einer Vielzahl von Kompilierungsfehlern führte und die Funktionsfähigkeit zentraler Backend-Komponenten vollständig beeinträchtigte.
+
+    - *Wiederherstellung* (Recovery Process): Zur Behebung des Vorfalls wurde ein manueller Wiederherstellungsprozess durchgeführt, der sich auf die bestehende Dokumentation aus Workflow 1 und Workflow 2 stützte. Insgesamt wurden 15 Dateien rekonstruiert und zentrale Funktionalitäten erneut implementiert.
+
+    - *Anmerkung:* Obwohl Bug 8 nicht als klassischer Implementierungsfehler im Quellcode einzustufen ist, wird er in dieser Arbeit bewusst als kritischer Fehlerfall betrachtet. Der Vorfall hatte erhebliche Auswirkungen auf die Funktionsfähigkeit des Gesamtsystems und ist als prozessbedingter Defekt im Entwicklungsworkflow einzuordnen.
+
+    - *Debug-Aufwand*: ca. 3 Stunden
+
++ *Frontend - Bugs*
+   - *Bug 1*(Session Management): Fehlende Aktualisierung der `guestSessionId`
+      - *Feature:* Guest Session / Start Page
+      - *Beschreibung:* Der Fehler entstand dadurch, dass nach dem Start der Guest-Session die Methode `setTableId()` nicht aufgerufen wurde und die `tableId` somit nicht im `localStorage` gespeichert war. Infolgedessen griffen nachfolgende API-Aufrufe auf einen falschen oder nicht gesetzten Tabellenwert zu.
+
+      #figure(
+          caption: [ Fehlende Aktualisierung der `guestSessionId` ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```ts
+            // start/[code]/+page.svelte
+            if (response.ok) {
+              const data = await response.json();
+              //  setTableId() wird nicht genutzt für API client
+              localStorage.setItem('guestSession', JSON.stringify(data));
+              goto('/menu');
+            }
+
+            //Lösung: Update    
+            // setTableId(data.id);  // localStorage.setItem('qr_restaurant_table_id', data.id)
+            ```
+          ],
+        )
+
+    - *Debug-Aufwand*: ca. 1 Stunden
+
+   - *Bug 2*(Integration / Configuration): Mehrere Integrationsprobleme in der Manager-Oberfläche
+      - *Feature:* Manager Dashboard & Pages (3 Issues innerhalb eines Features)
+      - *Beschreibung:* Im Rahmen der Implementierung der Manager-Oberfläche traten mehrere Integrationsprobleme auf, die unterschiedliche Ebenen der Frontend-Architektur betrafen. Die Fehler reichten von fehlenden Abhängigkeiten über fehlerhafte Importpfade und Typinkonsistenzen bis hin zu falschen Routing-Konfigurationen sowie unzulässigen Server-Imports im Client-Code.
+
+        Die Häufung dieser Probleme innerhalb eines einzelnen Features führte dazu, dass die betroffenen Manager-Seiten nicht korrekt kompiliert oder ausgeführt werden konnten und somit funktional nicht nutzbar waren.
+
+      #figure(
+          caption: [ Fehlerhafte Importpfade (Issue 1) ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```ts
+            // BEFORE
+            import { mockMenuItems } from '../../lib/mockData';  //  falscher Pfad
+            import { MenuItem } from '../../lib/types';          //  falscher Pfad
+
+            // AFTER
+            import { mockMenuItems } from '$lib/mockData';  //  SvelteKit-Alias
+            import { MenuItem } from '$lib/types';          //  korrekt
+
+            ```
+          ],
+        )
+      
+      #figure(
+          caption: [ Typinkonsistenzen (Issue 2) ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```ts
+            // BEFORE
+            export interface MenuItem {
+                id: string;        //  Typinkonsistenz
+                isActive: boolean; //  Feldname inkorrekt
+            }
+
+            // AFTER 
+            export interface MenuItem {
+                id: number;    //  Backend-form
+                active: boolean;
+            }
+
+            ```
+          ],
+        )
+
+      #figure(
+          caption: [ Falsche Routen (Issue 3) ],
+          supplement: [Listing],
+          kind: raw,
+          block(fill: luma(240), inset: 8pt, radius: 4pt)[
+            ```ts
+            // BEFORE
+            const navItems = [
+                { to: '/manager', label: 'Dashboard' },      //  404
+                { to: '/manager/menu', label: 'Menu' },      //  404
+            ];
+
+            // AFTER 
+            const navItems = [
+                { to: '/staff/manager', label: 'Dashboard' },     
+                { to: '/staff/manager/menu', label: 'Menu' },
+            ];
+
+            ```
+          ],
+        )
 
 
+    - *Debug-Aufwand*: ca. 2-3 Stunden
+
+ - *Bug 3* (UI / Data Visualization): Fehlende Y-Achsenbeschriftung in Diagrammen
+    - *Feature:* Revenue Reports – Charts
+    - *Beschreibung:* Bei Bug 3 traten Darstellungsprobleme in den Diagrammen der Umsatz- und Bestellberichte auf. Die Diagramme enthielten keine Y-Achsenbeschriftung, wodurch die dargestellten Werte nicht interpretierbar waren und die Skalierung unklar blieb.
+
+      Zusätzlich waren die Umsatzbalken teilweise nicht sichtbar oder farblich nicht eindeutig erkennbar. Im Bestelldiagramm fehlten zudem verbindende Linien zwischen den Datenpunkten, was die zeitliche Entwicklung der Bestellmengen erschwerte.
+
+      #figure(
+            caption: [ keine Y-Achse in Revenue Chart ],
+            supplement: [Listing],
+            kind: raw,
+            block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+              <!-- Revenue Chart – ohne Y-Achse -->
+              <div class="flex-1 flex items-end justify-between gap-2">
+                {#each chartData as data}
+                  <div class="bg-blue-500 w-full rounded-t-sm" 
+                      style="height: {(data.revenue / maxRevenue) * 100}%;">
+
+                    <!--  Keine Y-Achsenbeschriftung -->
+                  </div>
+                {/each}
+              </div>
 
 
+              ```
+            ],
+          )
+     *Lösung*:
+      #block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+              <!-- Revenue Chart - With Y-axis -->
+              <div class="flex-1 flex gap-4">
+                <!--  Y-axis labels -->
+                <div class="flex flex-col justify-between text-xs text-slate-400 pr-2 w-12 text-right">
+                  <span>3200</span>
+                  <span>2400</span>
+                  <span>1600</span>
+                  <span>800</span>
+                  <span>0</span>
+                </div>
+                
+                <!-- Chart area -->
+                <div class="flex-1 flex items-end justify-between gap-2">
+                  {#each chartData as data}
+                    <div class="bg-blue-500 w-full rounded-t-sm" 
+                        style="height: {(data.revenue / maxRevenue) * 100}%; min-height: 4px;">
+                      <!--  min-height ensures bars are visible -->
+                    </div>
+                  {/each}
+                </div>
+              </div>
+              <!-- Order Chart - With connecting lines -->
+              <div class="flex-1 flex gap-4">
+                <!-- Y-axis -->
+                <div class="flex flex-col justify-between text-xs text-slate-400 pr-2 w-12 text-right">
+                  <span>120</span>
+                  <span>90</span>
+                  <span>60</span>
+                  <span>30</span>
+                  <span>0</span>
+                </div>
+                
+                <!-- Chart with SVG lines -->
+                <div class="flex-1 relative">
+                  <svg class="absolute top-0 left-0 w-full h-full pointer-events-none">
+                    {#each chartData as data, i}
+                      {#if i < chartData.length - 1}
+                        <!-- SVG connecting lines -->
+                        <line 
+                          x1="{(i / (chartData.length - 1)) * 100}%" 
+                          y1="{100 - (data.orders / maxOrders) * 100}%"
+                          x2="{((i + 1) / (chartData.length - 1)) * 100}%" 
+                          y2="{100 - (chartData[i + 1].orders / maxOrders) * 100}%"
+                          stroke="#a855f7" 
+                          stroke-width="2"
+                        />
+                      {/if}
+                    {/each}
+                  </svg>
+                  <!-- Data points -->
+                </div>
+              </div>
 
+
+              ```
+            ]
+      #figure(
+            caption: [ keine Y-Achse in Revenue Chart (Losung) ],
+            supplement: [Listing],
+            kind: raw,
+            block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+            
+              ```
+            ],
+          )
+
+    - *Debug-Aufwand:* ca. 1,5 Stunden
+
+- *Bug 4* (Type / Runtime Error): Inkonsistente Bill-Property im Manager-Dashboard
+  - *Feature:* Manager Dashboard
+  - *Beschreibung:* Bei Bug 4 trat ein Laufzeitfehler im Manager-Dashboard auf, der durch eine inkonsistente Verwendung von Eigenschaften im `Bill-Objekt` verursacht wurde. Die zugrunde liegende Datenstruktur der Entität `Bill` hatte sich geändert, wobei das frühere Attribut completedOrders durch die Collection items ersetzt wurde.
+
+    Die Funktion `getDashboardSummary()` verwendete jedoch weiterhin die veraltete Eigenschaft `bill.completedOrders`. Da dieses Attribut zur Laufzeit nicht mehr existierte, führte der Zugriff auf eine undefinierte Referenz zu einem Fehler (`Cannot read properties of undefined`).
+
+    #figure(
+            caption: [ Inkonsistente Bill-Property ],
+            supplement: [Listing],
+            kind: raw,
+            block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+            // managerApi.ts – getDashboardSummary()
+            const todayOrders = todayBills.reduce(
+                (sum: number, bill: Bill) => 
+                    sum + bill.completedOrders.reduce(  //  veraltete Property
+                        (itemSum: number, item: OrderItem) => itemSum + item.quantity, 
+                        0
+                    ),
+                0
+            );
+            // Error: Cannot read properties of undefined (reading 'reduce')
+            //Lösung:
+            const todayOrders = todayBills.reduce(
+                (sum: number, bill: Bill) => 
+                    sum + bill.items.reduce(  //  korrekte Property
+                        (itemSum: number, item: BillItem) => itemSum + item.quantity,
+                        0
+                    ),
+                0
+            );
+              ```
+            ],
+          )
+  - *Debug-Aufwand:* ca. 0,5 Stunden
+
+- *Bug 5* (API Contract / Data Binding): Abweichende Feldnamen in der Umsatzkategorisierung
+  - *Feature:* Revenue Reports
+  - *Beschreibung:*Bei Bug 6 trat ein Fehler in der Darstellung der Umsatzkategorien auf, der auf eine Inkonsistenz zwischen Backend-Response und Frontend-Datenmodell zurückzuführen war. Während das Backend die Umsätze nach Kategorien unter dem Feldnamen `revenueByCategory` zurücklieferte, erwartete das Frontend fälschlicherweise das Feld `categoryBreakdown`.
+
+    Aufgrund dieser Abweichung konnte das Frontend die vom Backend gelieferten Daten nicht korrekt binden. Infolgedessen wurde im UI dauerhaft die Meldung „`No data available`“ angezeigt, obwohl valide Daten vorhanden waren.
+
+    #figure(
+            caption: [Abweichende Feldnamen ],
+            supplement: [Listing],
+            kind: raw,
+            block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+            // managerApi.ts - Interface definition
+            export interface RevenueReport {
+                period: string;
+                totalRevenue: number;
+                billCount: number;
+                categoryBreakdown: { category: string; revenue: number; }[];  // ❌ falscher Feldname
+            }
+            // reports/+page.svelte
+            {#if !report.categoryBreakdown || report.categoryBreakdown.length === 0}
+              <p>No data available</p>  // ← Always shows this!
+            {:else}
+              {#each report.categoryBreakdown as category}  //  undefined
+                <!-- ... -->
+              {/each}
+            {/if}
+            // Backend actual response:
+            // {
+            //   "revenueByCategory": [  ← Field name khác!
+            //     { "category": "Drinks", "revenue": 125000 }
+            //   ]
+            // }
+
+            //Lösung:
+              ```
+            ],
+          )
+
+    #figure(
+            caption: [ Abweichende Feldnamen (Lösung) ],
+            supplement: [Listing],
+            kind: raw,
+            block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+            // managerApi.ts - Aligned with backend
+            export interface RevenueReport {
+                period: string;
+                totalRevenue: number;
+                billCount: number;
+                revenueByCategory: { category: string; revenue: number; itemCount: number; }[];  // richtiger Feldname
+                revenueByPaymentMethod: { paymentMethod: string; amount: number; transactionCount: number; }[];  
+            }
+            // reports/+page.svelte
+            {#if !report.revenueByCategory || report.revenueByCategory.length === 0}  // richtiger Einsatz
+              <p>No data available</p>
+            {:else}
+              {#each report.revenueByCategory as category}  // ✅ funktioniert!
+                <div>{category.category}: €{category.revenue.toLocaleString()}</div>
+              {/each}
+            {/if}
+              ```
+            ],
+          )
+
+  - *Debug-Aufwand:* ca. 0,75 Stunden
+
+- *Bug 6* (UI / File Integrity): Beschädigte Dashboard-Seite
+  - *Feature:* Manager Dashboard
+  - *Beschreibung:* Bei Bug 6 trat ein kritischer Darstellungs- und Build-Fehler auf, der auf eine beschädigte Svelte-Komponente der Dashboard-Seite zurückzuführen war. Während des Bearbeitungsprozesses wurde die Datei inkonsistent verändert, wodurch mehrere strukturelle Probleme entstanden.
+
+    Konkret enthielt die Komponente doppelte `<script>`-Blöcke, eine fehlerhafte HTML-Struktur sowie nicht zueinander passende öffnende und schließende Tags. Diese Inkonsistenzen führten dazu, dass der Svelte-Compiler die Datei nicht mehr korrekt verarbeiten konnte.
+
+    #figure(
+            caption: [ Abweichende Feldnamen (Lösung) ],
+            supplement: [Listing],
+            kind: raw,
+            block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+                <script lang="ts">
+                  import { onMount } from 'svelte';
+                  // ... some code ...
+                </script>
+
+                <div class="dashboard">
+                  <!-- Some content -->
+
+                <!-- Unerwartet doppelter Script-Block -->
+                <script lang="ts">
+                  import { onMount } from 'svelte';
+                </script>
+                <!-- Fehlende bzw. inkonsistente Tags -->
+                </div> <!-- zusätzliches Tag -->
+                  <div>  <!-- zusätzliches öffnendes Tag -->
+                <!-- Compiler-Fehler: schließendes </div> ohne entsprechendes öffnendes Element -->
+              //Lösung: die zusätzliches Tags entfernen.
+              ```
+            ],
+          )
+  - *Debug-Aufwand:* ca. 0,15 Stunden (Fehler finden und fixen)
+
+- *Bug 7* (Syntax / Build Error): Tippfehler im Variablennamen
+  - *Feature:* Revenue Reports
+  - *Beschreibung:* Bei Bug 7 trat ein Kompilierungsfehler auf, der durch einen syntaktischen Tippfehler im Variablennamen verursacht wurde. Konkret enthielt der Variablenbezeichner ein Leerzeichen, was in JavaScript nicht zulässig ist.
+
+    Infolgedessen konnte der Svelte-Compiler die Komponente nicht verarbeiten und brach mit einem Syntaxfehler ab.
+    #figure(
+            caption: [ Abweichende Feldnamen (Lösung) ],
+            supplement: [Listing],
+            kind: raw,
+            block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+                // reports/+page.svelte
+                let is Loading = true;  //  Leerzeichen im Variablennamen
+
+                {#if is Loading}       //  Syntax-/Compile-Fehler
+                  <p>Loading...</p>
+                {/if}
+              //Lösung: Variablenamen anpassen
+              ```
+            ],
+          )
+  - *Debug-Aufwand:* ca. 0,15 Stunden (Fehler finden und fixen)
+
+- *Bug 8* (Runtime / Null Safety): Null-Referenzfehler auf der Reports-Seite
+  - *Feature:* Revenue Reports
+  - *Beschreibung:* Bei Bug 9 trat ein Laufzeitfehler auf, der durch den Zugriff auf verschachtelte Eigenschaften eines Objekts verursacht wurde, obwohl das übergeordnete Objekt noch den Wert `null` hatte. Während des initialen Ladezustands war das Objekt `report` noch nicht initialisiert, wurde jedoch bereits in reaktiven Statements sowie im Template verwendet.
+
+Dies führte zu einem klassischen `Null`-Referenzfehler (`Cannot read properties of null`) und verhinderte die korrekte Darstellung der Reports-Seite.
+
+    #figure(
+            caption: [ Null-Referenzfehler ],
+            supplement: [Listing],
+            kind: raw,
+            block(fill: luma(240), inset: 8pt, radius: 4pt)[
+              ```ts
+                let report: RevenueReport | null = null;
+
+                //  Reaktives Statement ohne Null-Prüfung
+                $: maxCategoryRevenue = Math.max(
+                    ...report.revenueByCategory.map(c => c.revenue)
+                );
+
+                //  Template greift auf null zu
+                {#if report.revenueByCategory.length === 0}
+                  <p>No data</p>
+                {/if}
+
+                // Runtime Error:
+                // Cannot read properties of null (reading 'revenueByCategory')
+
+                //Lösung:
+                // Reaktives Statement mit Null-Sicherheit
+                $: maxCategoryRevenue = report?.categoryBreakdown
+                    ? Math.max(...report.categoryBreakdown.map(c => c.revenue))
+                    : 1; // Sicherer Default-Wert
+              //  Null checks in template
+              {#if !report?.categoryBreakdown || report.categoryBreakdown.length === 0}
+                <p>No data available</p>
+                
+              <!-- Weitere abgesicherte Zugriffe -->
+              <p>{report?.categoryBreakdown?.length || 0}</p>
+              <p>{report?.categoryBreakdown?.reduce((sum, c) => sum + c.itemCount, 0) || 0}</p>
+                
+              ```
+            ],
+          )
+  - *Debug-Aufwand:* ca. 0,2 Stunden
 
